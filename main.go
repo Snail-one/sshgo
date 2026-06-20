@@ -18,9 +18,6 @@ func main() {
 	flag.BoolVar(&list, "list", false, "List all hosts from config and exit")
 	flag.Parse()
 
-	// Only guard actual connection launch paths (allows --help / --list / source inspection cross-platform)
-	needsWindows := false
-
 	home, err := os.UserHomeDir()
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Failed to get user home: %v\n", err)
@@ -35,17 +32,13 @@ func main() {
 
 	args := flag.Args()
 
-	if list || len(args) > 0 || (len(hosts) > 0) {
-		// We will do something interactive or direct that eventually launches (except pure --list)
-		if len(args) > 0 || !list {
-			needsWindows = true
-		}
-	}
+	// We only require Windows when we are about to actually spawn a terminal
+	willLaunch := len(args) > 0 || !list
 
-	if needsWindows && runtime.GOOS != "windows" {
-		fmt.Println("This tool is designed for Windows only (terminal launching).")
-		fmt.Println("You can still use --list and the parser on other platforms for development.")
-		os.Exit(1)
+	if willLaunch && runtime.GOOS != "windows" {
+		// Allow menu and --list on any platform (great for development/testing).
+		// Actual ssh launch will be simulated.
+		fmt.Println("[dev] Running on non-Windows — terminal launches will be simulated (no new window).")
 	}
 
 	if len(hosts) == 0 {
@@ -67,12 +60,35 @@ func main() {
 		return
 	}
 
-	// interactive
-	alias := promptSelect(hosts, cfgPath)
-	if alias == "" {
-		return
+	// interactive main menu loop
+	fmt.Println("sshls - SSH Host Picker")
+	fmt.Printf("Found %d hosts in %s\n", len(hosts), cfgPath)
+	fmt.Println("Choose a host to launch in a new terminal window. Menu will return after launch.")
+	fmt.Println("Type r to refresh list, 0 or q to exit.")
+
+	reader := bufio.NewReader(os.Stdin)
+
+	for {
+		fmt.Println()
+		for i, h := range hosts {
+			fmt.Printf("  %2d) %s\n", i+1, h)
+		}
+		fmt.Printf("  %2d) %s\n", 0, "退出")
+		fmt.Println()
+
+		choice := chooseHostOnce(hosts, reader)
+		if choice == "__REFRESH__" {
+			continue
+		}
+		if choice == "" {
+			fmt.Println("Exiting sshls. Goodbye!")
+			break
+		}
+
+		launchInTerminal(choice, cfgPath)
+		fmt.Printf("\n[✓] Launched new terminal: ssh %s\n", choice)
+		fmt.Println("    Returned to main menu. Select another host or press q to quit.")
 	}
-	launchInTerminal(alias, cfgPath)
 }
 
 func parseSSHConfig(path string) ([]string, error) {
@@ -169,32 +185,36 @@ func expandIncludePath(p, baseDir string) string {
 	return p
 }
 
-func promptSelect(hosts []string, cfgPath string) string {
-	fmt.Println("sshls - SSH Host Picker")
-	fmt.Printf("Found %d hosts in %s\n\n", len(hosts), cfgPath)
-
-	for i, h := range hosts {
-		fmt.Printf("  %2d) %s\n", i+1, h)
-	}
-	fmt.Println()
-
-	reader := bufio.NewReader(os.Stdin)
+// chooseHostOnce prompts the user once (with re-prompt on invalid input).
+// Returns:
+//   - host alias string when a host is selected
+//   - "__REFRESH__" when user wants to refresh the list (type r)
+//   - "" to quit (q, 0, empty, etc.)
+// It does NOT print the menu list itself.
+func chooseHostOnce(hosts []string, reader *bufio.Reader) string {
 	for {
-		fmt.Print("Enter number or partial name (q to quit): ")
+		fmt.Printf("Enter number (1-%d), partial name, r (refresh), 0 or q (quit): ", len(hosts))
 		input, err := reader.ReadString('\n')
 		if err != nil {
 			fmt.Println("\nInput error, cancelling.")
 			return ""
 		}
 		input = strings.TrimSpace(input)
+		lower := strings.ToLower(input)
 
-		if input == "" || strings.EqualFold(input, "q") {
-			fmt.Println("Cancelled.")
-			return ""
+		// Special commands first
+		if lower == "r" || lower == "refresh" {
+			return "__REFRESH__"
+		}
+		if input == "" || lower == "q" || lower == "quit" || lower == "0" || lower == "exit" {
+			return "" // quit
 		}
 
 		// Try numeric selection
 		if num, err := strconv.Atoi(input); err == nil {
+			if num == 0 {
+				return ""
+			}
 			if num >= 1 && num <= len(hosts) {
 				return hosts[num-1]
 			}
@@ -203,7 +223,6 @@ func promptSelect(hosts []string, cfgPath string) string {
 		}
 
 		// Substring / name match (case-insensitive, first match)
-		lower := strings.ToLower(input)
 		for _, h := range hosts {
 			if strings.Contains(strings.ToLower(h), lower) {
 				return h
@@ -217,15 +236,22 @@ func promptSelect(hosts []string, cfgPath string) string {
 func launchInTerminal(alias string, cfgPath string) {
 	fmt.Printf("Launching terminal for: ssh %s\n", alias)
 
+	if runtime.GOOS != "windows" {
+		// Simulation for development / testing on Linux/macOS
+		fmt.Printf("  [SIMULATED] Would open new terminal and run: ssh %s\n", alias)
+		fmt.Printf("  (On real Windows this opens wt/cmd and executes the ssh command.)\n")
+		return
+	}
+
 	var cmd *exec.Cmd
 
 	if _, err := exec.LookPath("wt"); err == nil {
-		// Prefer Windows Terminal
-		// start "SSH: alias" wt ssh alias
+		// 直接调用 Windows Terminal（更干净，不经过 cmd.exe）
+		// 使用 new-tab 可以设置标题，并且 wt 会自动在新窗口/标签中运行
 		title := "SSH: " + alias
-		cmd = exec.Command("cmd.exe", "/c", "start", title, "wt", "ssh", alias)
+		cmd = exec.Command("wt", "new-tab", "--title", title, "ssh", alias)
 	} else {
-		// Classic cmd fallback (keeps window after ssh exits via /k)
+		// 传统 cmd 窗口必须用 start 来打开新窗口
 		title := "SSH: " + alias
 		cmd = exec.Command("cmd.exe", "/c", "start", title, "cmd.exe", "/k", "ssh", alias)
 	}
@@ -234,5 +260,5 @@ func launchInTerminal(alias string, cfgPath string) {
 		fmt.Fprintf(os.Stderr, "Failed to launch terminal: %v\n", err)
 		fmt.Fprintf(os.Stderr, "You can still run manually: ssh %s\n", alias)
 	}
-	// Do not wait. Let sshls exit.
+	// Fire-and-forget: do not wait
 }
