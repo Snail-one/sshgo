@@ -57,7 +57,7 @@ Host prod-db
 }
 
 func TestParseSSHConfig_MissingFile(t *testing.T) {
-	hosts, err := parseSSHConfig("/non/existent/path/config-sshls-test")
+	hosts, err := parseSSHConfig("/non/existent/path/config-lssh-test")
 	if err != nil {
 		t.Errorf("expected no error for missing file, got %v", err)
 	}

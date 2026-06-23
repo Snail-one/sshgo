@@ -1,0 +1,24 @@
+# Sample SSH config for testing lssh.
+
+Host devbox
+    HostName 192.168.56.10
+    User dev
+    Port 22
+
+Host gitlab git
+    HostName gitlab.example.com
+    User git
+    IdentityFile ~/.ssh/id_ed25519
+
+Host prod-web
+    HostName web01.prod.example.com
+    User deploy
+    Port 2222
+
+Host *.internal
+    User internal
+
+Host *
+    ServerAliveInterval 60
+
+Include config.d/*.conf
