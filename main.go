@@ -75,8 +75,7 @@ func parseConfigFile(path string, seen map[string]struct{}, hosts *[]string, vis
 			continue
 		}
 
-		// Split on whitespace. First token is keyword.
-		fields := strings.Fields(line)
+		fields := splitConfigFields(line)
 		if len(fields) == 0 {
 			continue
 		}
@@ -84,8 +83,7 @@ func parseConfigFile(path string, seen map[string]struct{}, hosts *[]string, vis
 
 		if kw == "host" && len(fields) > 1 {
 			for _, name := range fields[1:] {
-				name = strings.TrimSpace(name)
-				if name == "" || name == "*" || strings.ContainsAny(name, "*?[") {
+				if shouldSkipHostPattern(name) {
 					continue
 				}
 				if _, ok := seen[name]; !ok {
@@ -98,7 +96,10 @@ func parseConfigFile(path string, seen map[string]struct{}, hosts *[]string, vis
 			for _, inc := range fields[1:] {
 				incPath := expandIncludePath(inc, baseDir)
 				matches, globErr := filepath.Glob(incPath)
-				if globErr != nil || len(matches) == 0 {
+				if globErr != nil {
+					return fmt.Errorf("invalid include pattern %s: %w", inc, globErr)
+				}
+				if len(matches) == 0 {
 					// treat as literal path if no glob match
 					matches = []string{incPath}
 				}
@@ -107,15 +108,43 @@ func parseConfigFile(path string, seen map[string]struct{}, hosts *[]string, vis
 					if visited[abs] {
 						continue // cycle prevention
 					}
-					if fi, statErr := os.Stat(m); statErr == nil && !fi.IsDir() {
-						visited[abs] = true
-						_ = parseConfigFile(m, seen, hosts, visited) // ignore sub errors
+					fi, statErr := os.Stat(m)
+					if statErr != nil {
+						if os.IsNotExist(statErr) {
+							continue
+						}
+						return fmt.Errorf("stat include %s: %w", m, statErr)
+					}
+					if fi.IsDir() {
+						continue
+					}
+					visited[abs] = true
+					if err := parseConfigFile(m, seen, hosts, visited); err != nil {
+						return fmt.Errorf("parse include %s: %w", m, err)
 					}
 				}
 			}
 		}
 	}
 	return scanner.Err()
+}
+
+func splitConfigFields(line string) []string {
+	fields := strings.Fields(line)
+	for i, field := range fields {
+		if strings.HasPrefix(field, "#") {
+			return fields[:i]
+		}
+	}
+	return fields
+}
+
+func shouldSkipHostPattern(name string) bool {
+	name = strings.TrimSpace(name)
+	return name == "" ||
+		name == "*" ||
+		strings.HasPrefix(name, "!") ||
+		strings.ContainsAny(name, "*?[")
 }
 
 func expandIncludePath(p, baseDir string) string {

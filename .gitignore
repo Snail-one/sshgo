@@ -1,4 +1,6 @@
 # Binaries
+lssh
+lssh.exe
 sshls
 sshls.exe
 *.exe

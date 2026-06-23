@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"strings"
 	"testing"
 )
 
@@ -47,12 +48,33 @@ Host *.internal
 Host *.example.com
 Host prod-db
 `
-	os.WriteFile(cfg, []byte(content), 0644)
+	mustWriteFile(t, cfg, content)
 
 	hosts, _ := parseSSHConfig(cfg)
 	want := []string{"prod-db"}
 	if !reflect.DeepEqual(hosts, want) {
 		t.Errorf("got %v want %v", hosts, want)
+	}
+}
+
+func TestParseSSHConfig_CommentsAndNegatedPatterns(t *testing.T) {
+	dir := t.TempDir()
+	cfg := filepath.Join(dir, "config")
+	content := `
+Host prod-db # production database
+Host prod-web !prod-web-old *.internal
+Host !bastion
+`
+	mustWriteFile(t, cfg, content)
+
+	hosts, err := parseSSHConfig(cfg)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	want := []string{"prod-db", "prod-web"}
+	if !reflect.DeepEqual(hosts, want) {
+		t.Errorf("got %v, want %v", hosts, want)
 	}
 }
 
@@ -78,16 +100,16 @@ Host main1
 Include includes/*.conf
 Include extra.conf
 `
-	os.WriteFile(mainCfg, []byte(mainContent), 0644)
+	mustWriteFile(t, mainCfg, mainContent)
 
 	// include dir + glob
 	incDir := filepath.Join(dir, "includes")
-	os.Mkdir(incDir, 0755)
-	os.WriteFile(filepath.Join(incDir, "a.conf"), []byte("Host inc-a\n    HostName a.local\n"), 0644)
-	os.WriteFile(filepath.Join(incDir, "b.conf"), []byte("Host inc-b\n"), 0644)
+	mustMkdir(t, incDir)
+	mustWriteFile(t, filepath.Join(incDir, "a.conf"), "Host inc-a\n    HostName a.local\n")
+	mustWriteFile(t, filepath.Join(incDir, "b.conf"), "Host inc-b\n")
 
 	// literal include
-	os.WriteFile(filepath.Join(dir, "extra.conf"), []byte("Host extra-one\nHost extra-two\n"), 0644)
+	mustWriteFile(t, filepath.Join(dir, "extra.conf"), "Host extra-one\nHost extra-two\n")
 
 	hosts, err := parseSSHConfig(mainCfg)
 	if err != nil {
@@ -105,8 +127,8 @@ func TestParseSSHConfig_IncludeCycleSafety(t *testing.T) {
 	main := filepath.Join(dir, "config")
 	inc := filepath.Join(dir, "loop.conf")
 
-	os.WriteFile(main, []byte("Host root\nInclude loop.conf\n"), 0644)
-	os.WriteFile(inc, []byte("Host looped\nInclude ../config\n"), 0644) // would cycle
+	mustWriteFile(t, main, "Host root\nInclude loop.conf\n")
+	mustWriteFile(t, inc, "Host looped\nInclude config\n")
 
 	hosts, err := parseSSHConfig(main)
 	if err != nil {
@@ -119,6 +141,23 @@ func TestParseSSHConfig_IncludeCycleSafety(t *testing.T) {
 	}
 	if len(wantContains) != 0 {
 		t.Errorf("missing expected hosts, remaining: %v, got: %v", wantContains, hosts)
+	}
+}
+
+func TestParseSSHConfig_IncludeParseError(t *testing.T) {
+	dir := t.TempDir()
+	main := filepath.Join(dir, "config")
+	inc := filepath.Join(dir, "bad.conf")
+
+	mustWriteFile(t, main, "Host root\nInclude bad.conf\n")
+	mustWriteFile(t, inc, strings.Repeat("a", 70*1024))
+
+	_, err := parseSSHConfig(main)
+	if err == nil {
+		t.Fatal("expected include parse error, got nil")
+	}
+	if !strings.Contains(err.Error(), "parse include") {
+		t.Fatalf("expected include context in error, got %v", err)
 	}
 }
 
@@ -138,5 +177,19 @@ func TestExpandIncludePath(t *testing.T) {
 		if got != c.contains {
 			t.Errorf("expandIncludePath(%q, %q) = %q, want %q", c.in, c.base, got, c.contains)
 		}
+	}
+}
+
+func mustWriteFile(t *testing.T, path, content string) {
+	t.Helper()
+	if err := os.WriteFile(path, []byte(content), 0644); err != nil {
+		t.Fatalf("write %s: %v", path, err)
+	}
+}
+
+func mustMkdir(t *testing.T, path string) {
+	t.Helper()
+	if err := os.Mkdir(path, 0755); err != nil {
+		t.Fatalf("mkdir %s: %v", path, err)
 	}
 }
